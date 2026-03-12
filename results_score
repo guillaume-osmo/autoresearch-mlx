@@ -1,0 +1,307 @@
+Cache directory: /Users/tgg/.cache/autoresearch
+
+Data: downloading 11 shards (0 already exist)...
+  Downloaded shard_00007.parquet
+  Downloaded shard_00003.parquet
+  Downloaded shard_00002.parquet
+  Downloaded shard_00000.parquet
+  Downloaded shard_00004.parquet
+  Downloaded shard_00005.parquet
+  Downloaded shard_00009.parquet
+  Downloaded shard_00001.parquet
+  Downloaded shard_00008.parquet
+  Downloaded shard_00006.parquet
+  Downloaded shard_06542.parquet
+Data: 11/11 shards ready at /Users/tgg/.cache/autoresearch/data
+
+Tokenizer: training BPE tokenizer...
+Tokenizer: trained in 25.1s, saved to /Users/tgg/.cache/autoresearch/tokenizer/tokenizer.pkl
+Tokenizer: building token_bytes lookup...
+Tokenizer: saved token_bytes to /Users/tgg/.cache/autoresearch/tokenizer/token_bytes.npy
+Tokenizer: sanity check passed (vocab_size=8192)
+
+Done! Ready to train.
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscore.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 360s
+Gradient accumulation steps: 2
+Layout: prefix=0, score1=(1 shared blocks x 4 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.5s
+step 00507 (100.0%) | loss: 3.921435 | lrm: 0.00 | dt: 728ms | tok/sec: 90,047 | epoch: 1 | remaining: 0s     
+Training completed in 361.0s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.4s
+---
+val_bpb:          1.380340
+training_seconds: 360.7
+total_seconds:    368.1
+peak_vram_mb:     27177.2
+mfu_percent:      0.00
+total_tokens_M:   33.3
+num_steps:        508
+num_params_M:     19.7
+depth:            4
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscore.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 360s
+Gradient accumulation steps: 2
+Layout: prefix=4, score1=(0 shared blocks x 0 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.5s
+step 00507 (99.9%) | loss: 3.654611 | lrm: 0.00 | dt: 743ms | tok/sec: 88,234 | epoch: 1 | remaining: 0s      
+Training completed in 360.7s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.5s
+---
+val_bpb:          1.286485
+training_seconds: 360.3
+total_seconds:    367.8
+peak_vram_mb:     27199.7
+mfu_percent:      0.00
+total_tokens_M:   33.3
+num_steps:        508
+num_params_M:     22.0
+depth:            4
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscore.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 360s
+Gradient accumulation steps: 2
+Layout: prefix=4, score1=(0 shared blocks x 0 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.5s
+step 00488 (99.9%) | loss: 3.649653 | lrm: 0.00 | dt: 715ms | tok/sec: 91,649 | epoch: 1 | remaining: 0s       
+Training completed in 360.7s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.5s
+---
+val_bpb:          1.294332
+training_seconds: 360.3
+total_seconds:    367.8
+peak_vram_mb:     26938.7
+mfu_percent:      0.00
+total_tokens_M:   32.0
+num_steps:        489
+num_params_M:     21.5
+depth:            4
+
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run train5.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 360s
+Gradient accumulation steps: 2
+Layout: prefix=0, score1=(1 shared blocks x 2 steps), middle=1, score2=(1 shared blocks x 2 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+MLP expansion: 4.0
+Model compiled in 0.8s
+step 00289 (99.8%) | loss: 3.906706 | lrm: 0.00 | dt: 1336ms | tok/sec: 49,040 | epoch: 1 | remaining: 0s      
+Training completed in 361.4s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 10.1s
+---
+val_bpb:          1.369503
+training_seconds: 360.8
+total_seconds:    372.3
+peak_vram_mb:     28498.3
+mfu_percent:      0.00
+total_tokens_M:   19.0
+num_steps:        290
+num_params_M:     33.6
+depth:            5
+effective_depth:  5
+unique_layers:    3
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run train5.py
+
+$Data/tokenizer loaded in 0.1s
+Time budget: 360s
+Gradient accumulation steps: 2
+Layout: prefix=0, score1=(1 shared blocks x 2 steps), middle=0, score2=(1 shared blocks x 2 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+MLP expansion: 4.0
+Model compiled in 0.5s
+step 00516 (99.9%) | loss: 3.636124 | lrm: 0.00 | dt: 720ms | tok/sec: 91,042 | epoch: 1 | remaining: 0s      
+Training completed in 360.7s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.6s
+---
+val_bpb:          1.282717
+training_seconds: 360.3
+total_seconds:    367.9
+peak_vram_mb:     27156.7
+mfu_percent:      0.00
+total_tokens_M:   33.9
+num_steps:        517
+num_params_M:     18.4
+depth:            4
+effective_depth:  4
+unique_layers:    2
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run train5.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 300s
+Gradient accumulation steps: 2
+Layout: prefix=0, score1=(1 shared blocks x 2 steps), middle=0, score2=(1 shared blocks x 2 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+MLP expansion: 4.0
+Model compiled in 0.5s
+step 00444 (99.9%) | loss: 3.700303 | lrm: 0.00 | dt: 671ms | tok/sec: 97,657 | epoch: 1 | remaining: 0s      
+Training completed in 300.6s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.4s
+---
+val_bpb:          1.302060
+training_seconds: 300.3
+total_seconds:    307.6
+peak_vram_mb:     27156.7
+mfu_percent:      0.00
+total_tokens_M:   29.2
+num_steps:        445
+num_params_M:     18.4
+depth:            4
+effective_depth:  4
+unique_layers:    2
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run train5.py
+
+Data/tokenizer loaded in 0.1s
+Time budget: 300s
+Gradient accumulation steps: 2
+Layout: prefix=4, score1=(0 shared blocks x 0 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_v2 | muon_ns_steps=3 | normuon=True
+Bigram: True | bigram_scale=0.1
+MLP expansion: 4.0
+Model compiled in 0.5s
+step 00442 (99.8%) | loss: 3.713093 | lrm: 0.00 | dt: 678ms | tok/sec: 96,630 | epoch: 1 | remaining: 0s      
+Training completed in 300.4s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.2s
+---
+val_bpb:          1.302484
+training_seconds: 300.0
+total_seconds:    307.2
+peak_vram_mb:     27199.7
+mfu_percent:      0.00
+total_tokens_M:   29.0
+num_steps:        443
+num_params_M:     22.0
+depth:            4
+effective_depth:  4
+unique_layers:    4
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscorev1.py 
+Data/tokenizer loaded in 0.1s
+  Muon group: 2 params of shape (2, 32)
+  Muon group: 16 params of shape (256, 256)
+  Muon group: 4 params of shape (256, 683)
+  Muon group: 8 params of shape (683, 256)
+Time budget: 300s
+Gradient accumulation steps: 1
+Layout: prefix=4, score1=(0 shared blocks x 0 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_adamw (muon=on, ns=5, beta2=0.99)
+MLP: SwiGLU | expansion=2.667
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.4s
+step 01647 (100.0%) | loss: 3.556493 | lrm: 0.10 | dt: 180ms | tok/sec: 90,853 | epoch: 1 | remaining: 0s     
+Training completed in 300.4s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.3s
+---
+val_bpb:          1.259361
+training_seconds: 300.1
+total_seconds:    307.2
+peak_vram_mb:     27497.4
+mfu_percent:      0.00
+total_tokens_M:   27.0
+num_steps:        1648
+num_params_M:     22.0
+depth:            4
+effective_depth:  4
+unique_layers:    4
+optimizer:        muon_adamw (muon=on, ns=5, beta2=0.99)
+mlp:              SwiGLU
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscorev1.py
+Data/tokenizer loaded in 0.1s
+  Muon group: 1 params of shape (2, 32)
+  Muon group: 8 params of shape (256, 256)
+  Muon group: 2 params of shape (256, 683)
+  Muon group: 4 params of shape (683, 256)
+Time budget: 300s
+Gradient accumulation steps: 1
+Layout: prefix=0, score1=(1 shared blocks x 2 steps), middle=0, score2=(1 shared blocks x 2 steps), suffix=0, score_dt=0.5, single_dt=0.5
+Optimizer: muon_adamw (muon=on, ns=5, beta2=0.99)
+MLP: SwiGLU | expansion=2.667
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.3s
+step 01610 (99.9%) | loss: 3.564373 | lrm: 0.10 | dt: 208ms | tok/sec: 78,889 | epoch: 1 | remaining: 0s      
+Training completed in 300.2s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.8s
+---
+val_bpb:          1.273113
+training_seconds: 300.0
+total_seconds:    307.2
+peak_vram_mb:     27461.3
+mfu_percent:      0.00
+total_tokens_M:   26.4
+num_steps:        1611
+num_params_M:     18.4
+depth:            4
+effective_depth:  4
+unique_layers:    2
+optimizer:        muon_adamw (muon=on, ns=5, beta2=0.99)
+mlp:              SwiGLU
+
+(mlxgraphenv-py311) tgg@MacBook-Pro-3 autoresearch-mlx % uv run trainscorev1.py
+Data/tokenizer loaded in 0.1s
+  Muon group: 2 params of shape (2, 32)
+  Muon group: 16 params of shape (256, 256)
+  Muon group: 4 params of shape (256, 683)
+  Muon group: 8 params of shape (683, 256)
+Time budget: 300s
+Gradient accumulation steps: 1
+Layout: prefix=4, score1=(0 shared blocks x 0 steps), middle=0, score2=(0 shared blocks x 0 steps), suffix=0, score_dt=0.5, single_dt=1
+Optimizer: muon_adamw (muon=on, ns=5, beta2=0.99)
+MLP: SwiGLU | expansion=2.667
+Bigram: True | bigram_scale=0.1
+Model compiled in 0.3s
+step 01580 (100.0%) | loss: 3.608541 | lrm: 0.10 | dt: 212ms | tok/sec: 77,226 | epoch: 1 | remaining: 0s     
+Training completed in 300.3s
+Starting final eval...
+Final eval batch size: 256
+Final eval completed in 6.7s
+---
+val_bpb:          1.262059
+training_seconds: 300.2
+total_seconds:    307.2
+peak_vram_mb:     27497.4
+mfu_percent:      0.00
+total_tokens_M:   25.9
+num_steps:        1581
+num_params_M:     22.0
+depth:            4
+effective_depth:  4
+unique_layers:    4
+optimizer:        muon_adamw (muon=on, ns=5, beta2=0.99)
+mlp:              SwiGLU
