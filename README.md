@@ -27,13 +27,19 @@ uv run train.py
 
 ## How it works
 
-Same as the original. Three files that matter:
+Same as the original + SCORE injections. Five files that matter:
 
 - **`prepare.py`** — data prep, tokenizer, dataloader, evaluation. Not modified.
 - **`train.py`** — model, optimizer, training loop. The agent edits this.
+- **`trainscore.py`** — SCORE code with NorMUON_v2 using my implementation.
+- **`trainscorev1.py`** — SCORE code with NorMUON_v2 using a better implementation then mine.
 - **`program.md`** — agent instructions. Point your agent here.
 
 The agent reads `program.md`, modifies `train.py`, runs a 5-minute experiment, checks `val_bpb`, and commits or reverts. Repeat overnight. Wake up to results.
+
+SCORE could reduce memory and improve residual skip connection https://arxiv.org/abs/2603.10544
+
+In results_score you can find my manual modifications results see paper supplementary last page for 11 March best results.
 
 ## Results on M1 Mac Studio (48GB)
 
