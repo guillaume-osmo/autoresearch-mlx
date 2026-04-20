@@ -14,9 +14,12 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten, tree_map
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, evaluate_bpb, make_dataloader
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, evaluate_bpb, get_token_bytes, make_dataloader
 
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+NORM_EPS = 1e-5
+FAST_OPS = getattr(mx, "fast", None)
 
 
 @dataclass
@@ -30,22 +33,50 @@ class GPTConfig:
     window_pattern: str = "SSSL"
 
 
-def norm(x):
-    return x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + 1e-5)
+def rms_norm(x):
+    if FAST_OPS is not None and hasattr(FAST_OPS, "rms_norm"):
+        return FAST_OPS.rms_norm(x, None, NORM_EPS)
+    return x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + NORM_EPS)
+
+
+def relu2(x):
+    if FAST_OPS is not None and hasattr(FAST_OPS, "relu2"):
+        return FAST_OPS.relu2(x)
+    return mx.maximum(x, 0) ** 2
+
+
+def cached_weight_t(linear):
+    weight = linear.weight
+    weight_ref = id(weight)
+    cached_ref = getattr(linear, "_cached_weight_t_source_id", None)
+    if cached_ref != weight_ref:
+        linear._cached_weight_t = weight.T
+        linear._cached_weight_t_source_id = weight_ref
+    return linear._cached_weight_t
+
+
+def linear_forward(linear, x):
+    return linear(x)
+
+
+def rms_linear(linear, x):
+    return linear(rms_norm(x))
 
 
 def has_ve(layer_idx, n_layer):
     """Returns True if layer should have Value Embedding (alternating, last always included)."""
+    if VE_EVERY_LAYER:
+        return True
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
-def create_additive_causal_mask(seq_len, dtype=mx.float32):
+def create_additive_causal_mask(seq_len, dtype=mx.bfloat16):
     indices = mx.arange(seq_len)
     blocked = indices[None, :] > indices[:, None]
     return mx.where(blocked, mx.array(float("-inf"), dtype=dtype), mx.array(0.0, dtype=dtype))
 
 
-def create_sliding_window_mask(seq_len, window_size, dtype=mx.float32):
+def create_sliding_window_mask(seq_len, window_size, dtype=mx.bfloat16):
     indices = mx.arange(seq_len)
     causal = indices[None, :] > indices[:, None]
     too_far = (indices[:, None] - indices[None, :]) >= window_size
@@ -57,6 +88,123 @@ def get_peak_memory_mb():
     return mx.get_peak_memory() / 1024 / 1024
 
 
+class InLoopMemory:
+    """
+    Lightweight in-training memory feedback:
+    - GradMem: token-level reward memory
+    - Engram: deterministic hashed n-gram slot memory
+    """
+
+    def __init__(self, mode="both", adapt_strength=0.08, adapt_clamp=0.20):
+        self.mode = mode
+        self.adapt_strength = adapt_strength
+        self.adapt_clamp = adapt_clamp
+        self.token_stats = {}
+        self.engram_slots_2g = {}
+        self.engram_slots_3g = {}
+        self.seed = 17
+
+    def _hash64(self, text):
+        h = 1469598103934665603
+        for b in text.encode("utf-8", errors="ignore"):
+            h ^= b
+            h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+        return int(h)
+
+    def _context_tokens(self, probe_delta, train_loss, peak_mem_mb):
+        toks = []
+        toks.append("probe_up" if probe_delta > 0 else "probe_down")
+        toks.append("loss_low" if train_loss < 2.0 else "loss_high")
+        toks.append("mem_high" if peak_mem_mb > 24000 else "mem_ok")
+        toks.append("delta_big" if abs(probe_delta) > 0.01 else "delta_small")
+        return toks
+
+    def _update_gradmem(self, tokens, reward):
+        for tok in tokens:
+            st = self.token_stats.setdefault(tok, {"score": 0.0, "seen": 0})
+            st["score"] += reward
+            st["seen"] += 1
+
+    def _engram_slot_id(self, ngram_tokens, mod):
+        vals = [self._hash64(tok) for tok in ngram_tokens]
+        mix = vals[0] * (10007 + self.seed)
+        for idx, val in enumerate(vals[1:], start=1):
+            mix ^= val * (10009 + 97 * idx + self.seed)
+        return int(mix % mod)
+
+    def _update_engram(self, tokens, reward):
+        if len(tokens) >= 2:
+            for i in range(len(tokens) - 1):
+                ng = tokens[i : i + 2]
+                sid = self._engram_slot_id(ng, 10007)
+                st = self.engram_slots_2g.setdefault(sid, {"score": 0.0, "seen": 0})
+                st["score"] += reward
+                st["seen"] += 1
+        if len(tokens) >= 3:
+            for i in range(len(tokens) - 2):
+                ng = tokens[i : i + 3]
+                sid = self._engram_slot_id(ng, 20011)
+                st = self.engram_slots_3g.setdefault(sid, {"score": 0.0, "seen": 0})
+                st["score"] += reward
+                st["seen"] += 1
+
+    def _score_gradmem(self, tokens):
+        vals = []
+        for tok in tokens:
+            st = self.token_stats.get(tok)
+            if st is None:
+                continue
+            vals.append(st["score"] / math.sqrt(max(1, st["seen"])))
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def _score_engram(self, tokens):
+        vals = []
+        if len(tokens) >= 2:
+            for i in range(len(tokens) - 1):
+                sid = self._engram_slot_id(tokens[i : i + 2], 10007)
+                st = self.engram_slots_2g.get(sid)
+                if st is not None:
+                    vals.append(st["score"] / math.sqrt(max(1, st["seen"])))
+        if len(tokens) >= 3:
+            for i in range(len(tokens) - 2):
+                sid = self._engram_slot_id(tokens[i : i + 3], 20011)
+                st = self.engram_slots_3g.get(sid)
+                if st is not None:
+                    vals.append(st["score"] / math.sqrt(max(1, st["seen"])))
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def update(self, probe_delta, train_loss, peak_mem_mb):
+        if self.mode == "off":
+            return 1.0, 0.0
+        tokens = self._context_tokens(probe_delta, train_loss, peak_mem_mb)
+        reward = probe_delta
+        if self.mode in ("both", "gradmem"):
+            self._update_gradmem(tokens, reward)
+        if self.mode in ("both", "engram"):
+            self._update_engram(tokens, reward)
+        g_score = self._score_gradmem(tokens) if self.mode in ("both", "gradmem") else 0.0
+        e_score = self._score_engram(tokens) if self.mode in ("both", "engram") else 0.0
+        score = g_score + e_score
+        delta = max(-self.adapt_clamp, min(self.adapt_clamp, self.adapt_strength * math.tanh(score)))
+        return 1.0 + delta, score
+
+
+def evaluate_bpb_probe(model, token_bytes, val_loader, max_batches):
+    total_nats = 0.0
+    total_bytes = 0
+    for _ in range(max_batches):
+        x, y, _ = next(val_loader)
+        loss_flat = model(x, y, reduction="none").reshape(-1)
+        y_flat = y.reshape(-1)
+        nbytes = mx.take(token_bytes, y_flat, axis=0)
+        mask = nbytes > 0
+        total_nats += mx.sum(loss_flat * mask).item()
+        total_bytes += int(mx.sum(nbytes).item())
+    if total_bytes == 0:
+        return float("inf")
+    return total_nats / (math.log(2) * total_bytes)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -66,9 +214,14 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.use_packed_qkv = self.n_kv_head == self.n_head
+        if self.use_packed_qkv:
+            qkv_dim = (self.n_head + 2 * self.n_kv_head) * self.head_dim
+            self.c_qkv = nn.Linear(self.n_embd, qkv_dim, bias=False)
+        else:
+            self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+            self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+            self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
         self.ve_gate = (
@@ -80,38 +233,51 @@ class CausalSelfAttention(nn.Module):
 
     def __call__(self, x, ve, mask):
         batch_size, seq_len, _ = x.shape
-        q = self.c_q(x).reshape(batch_size, seq_len, self.n_head, self.head_dim)
-        k = self.c_k(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
-        v = self.c_v(x).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
+        x_norm = rms_norm(x)
+        if self.use_packed_qkv:
+            qkv = linear_forward(self.c_qkv, x_norm).reshape(
+                batch_size,
+                seq_len,
+                self.n_head + 2 * self.n_kv_head,
+                self.head_dim,
+            )
+            q = qkv[:, :, : self.n_head, :]
+            k = qkv[:, :, self.n_head : self.n_head + self.n_kv_head, :]
+            v = qkv[:, :, self.n_head + self.n_kv_head :, :]
+        else:
+            q = linear_forward(self.c_q, x_norm).reshape(batch_size, seq_len, self.n_head, self.head_dim)
+            k = linear_forward(self.c_k, x_norm).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
+            v = linear_forward(self.c_v, x_norm).reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
 
         if ve is not None and self.ve_gate is not None:
             ve = ve.reshape(batch_size, seq_len, self.n_kv_head, self.head_dim)
-            gate = 2 * mx.sigmoid(self.ve_gate(x[..., : self.ve_gate_channels]))
+            gate = 2 * mx.sigmoid(linear_forward(self.ve_gate, x_norm[..., : self.ve_gate_channels]))
             v = v + mx.expand_dims(gate, axis=-1) * ve
 
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
         v = v.transpose(0, 2, 1, 3)
 
-        q = norm(self.rope(q))
-        k = norm(self.rope(k))
+        q = rms_norm(self.rope(q))
+        k = rms_norm(self.rope(k))
 
         scale = 1.0 / math.sqrt(self.head_dim)
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
         y = y.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
-        return self.c_proj(y)
+        return linear_forward(self.c_proj, y)
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        hidden_dim = MLP_RATIO * config.n_embd
+        self.c_fc = nn.Linear(config.n_embd, hidden_dim, bias=False)
+        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
 
     def __call__(self, x):
-        x = self.c_fc(x)
-        x = mx.maximum(x, 0) ** 2
-        return self.c_proj(x)
+        x = rms_linear(self.c_fc, x)
+        x = relu2(x)
+        return linear_forward(self.c_proj, x)
 
 
 class Block(nn.Module):
@@ -121,8 +287,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def __call__(self, x, ve, mask):
-        x = x + self.attn(norm(x), ve, mask)
-        x = x + self.mlp(norm(x))
+        x = x + self.attn(x, ve, mask)
+        x = x + self.mlp(x)
         return x
 
 
@@ -134,15 +300,12 @@ class GPT(nn.Module):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.blocks = [Block(config, i) for i in range(config.n_layer)]
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.resid_lambdas = mx.ones((config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.zeros((config.n_layer,), dtype=mx.float32)
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.value_embeds = {
-            str(i): nn.Embedding(config.vocab_size, kv_dim)
+        self.value_embeds = [
+            nn.Embedding(config.vocab_size, kv_dim) if has_ve(i, config.n_layer) else None
             for i in range(config.n_layer)
-            if has_ve(i, config.n_layer)
-        }
+        ]
         self._mask_cache = {}
 
     def init_weights(self):
@@ -153,20 +316,21 @@ class GPT(nn.Module):
         self.lm_head.weight = (mx.random.normal(self.lm_head.weight.shape) * 0.001).astype(mx.bfloat16)
 
         for block in self.blocks:
-            block.attn.c_q.weight = mx.random.uniform(-scale, scale, block.attn.c_q.weight.shape).astype(mx.bfloat16)
-            block.attn.c_k.weight = mx.random.uniform(-scale, scale, block.attn.c_k.weight.shape).astype(mx.bfloat16)
-            block.attn.c_v.weight = mx.random.uniform(-scale, scale, block.attn.c_v.weight.shape).astype(mx.bfloat16)
+            if block.attn.use_packed_qkv:
+                block.attn.c_qkv.weight = mx.random.uniform(-scale, scale, block.attn.c_qkv.weight.shape).astype(mx.bfloat16)
+            else:
+                block.attn.c_q.weight = mx.random.uniform(-scale, scale, block.attn.c_q.weight.shape).astype(mx.bfloat16)
+                block.attn.c_k.weight = mx.random.uniform(-scale, scale, block.attn.c_k.weight.shape).astype(mx.bfloat16)
+                block.attn.c_v.weight = mx.random.uniform(-scale, scale, block.attn.c_v.weight.shape).astype(mx.bfloat16)
             block.attn.c_proj.weight = mx.zeros_like(block.attn.c_proj.weight).astype(mx.bfloat16)
             block.mlp.c_fc.weight = mx.random.uniform(-scale, scale, block.mlp.c_fc.weight.shape).astype(mx.bfloat16)
             block.mlp.c_proj.weight = mx.zeros_like(block.mlp.c_proj.weight).astype(mx.bfloat16)
             if block.attn.ve_gate is not None:
                 block.attn.ve_gate.weight = mx.zeros_like(block.attn.ve_gate.weight).astype(mx.bfloat16)
 
-        self.resid_lambdas = mx.ones((self.config.n_layer,), dtype=mx.float32)
-        self.x0_lambdas = mx.full((self.config.n_layer,), 0.1, dtype=mx.float32)
-
-        for ve in self.value_embeds.values():
-            ve.weight = mx.random.uniform(-scale, scale, ve.weight.shape).astype(mx.bfloat16)
+        for ve in self.value_embeds:
+            if ve is not None:
+                ve.weight = mx.random.uniform(-scale, scale, ve.weight.shape).astype(mx.bfloat16)
 
     def _compute_window_sizes(self, config):
         pattern = config.window_pattern.upper()
@@ -181,32 +345,32 @@ class GPT(nn.Module):
         window_sizes[-1] = long_window
         return window_sizes
 
-    def _get_masks(self, seq_len):
+    def _get_masks(self, seq_len, dtype):
         unique_windows = set(self.window_sizes)
         for window_size in unique_windows:
-            key = (seq_len, window_size)
+            key = (seq_len, window_size, dtype)
             if key not in self._mask_cache:
                 if window_size >= seq_len:
-                    self._mask_cache[key] = create_additive_causal_mask(seq_len)
+                    self._mask_cache[key] = create_additive_causal_mask(seq_len, dtype=dtype)
                 else:
-                    self._mask_cache[key] = create_sliding_window_mask(seq_len, window_size)
-        return [self._mask_cache[(seq_len, window_size)] for window_size in self.window_sizes]
+                    self._mask_cache[key] = create_sliding_window_mask(
+                        seq_len,
+                        window_size,
+                        dtype=dtype,
+                    )
+        return [self._mask_cache[(seq_len, window_size, dtype)] for window_size in self.window_sizes]
 
     def __call__(self, idx, targets=None, reduction="mean"):
         _, seq_len = idx.shape
-        masks = self._get_masks(seq_len)
-
         x = self.wte(idx)
-        x = norm(x)
-        x0 = x
+        masks = self._get_masks(seq_len, x.dtype)
+        x = rms_norm(x)
         for i, block in enumerate(self.blocks):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
+            ve = self.value_embeds[i](idx) if self.value_embeds[i] is not None else None
             x = block(x, ve, masks[i])
-        x = norm(x)
+        x = rms_norm(x)
 
-        logits = self.lm_head(x).astype(mx.float32)
-        logits = 15.0 * mx.tanh(logits / 15.0)
+        logits = linear_forward(self.lm_head, x).astype(mx.float32)
 
         if targets is None:
             return logits
@@ -222,7 +386,7 @@ class GPT(nn.Module):
 
 
 class AdamW:
-    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, scalar_lr):
+    def __init__(self, model, unembedding_lr, embedding_lr, matrix_lr, weight_decay, adam_betas, adam_eps):
         self.param_config = {}
         self.adam_state = {}
 
@@ -235,49 +399,35 @@ class AdamW:
                 self.param_config[path] = {
                     "lr": matrix_lr,
                     "betas": adam_betas,
-                    "eps": 1e-10,
+                    "eps": adam_eps,
                     "weight_decay": weight_decay,
                 }
             elif "wte" in path:
                 self.param_config[path] = {
                     "lr": embedding_lr * dmodel_lr_scale,
                     "betas": adam_betas,
-                    "eps": 1e-10,
+                    "eps": adam_eps,
                     "weight_decay": 0.0,
                 }
             elif "value_embeds" in path:
                 self.param_config[path] = {
                     "lr": embedding_lr * dmodel_lr_scale,
                     "betas": adam_betas,
-                    "eps": 1e-10,
+                    "eps": adam_eps,
                     "weight_decay": 0.0,
                 }
             elif "lm_head" in path:
                 self.param_config[path] = {
                     "lr": unembedding_lr * dmodel_lr_scale,
                     "betas": adam_betas,
-                    "eps": 1e-10,
-                    "weight_decay": 0.0,
-                }
-            elif "resid_lambdas" in path:
-                self.param_config[path] = {
-                    "lr": scalar_lr * 0.01,
-                    "betas": adam_betas,
-                    "eps": 1e-10,
-                    "weight_decay": 0.0,
-                }
-            elif "x0_lambdas" in path:
-                self.param_config[path] = {
-                    "lr": scalar_lr,
-                    "betas": (0.96, 0.95),
-                    "eps": 1e-10,
+                    "eps": adam_eps,
                     "weight_decay": 0.0,
                 }
             else:
                 self.param_config[path] = {
                     "lr": unembedding_lr * dmodel_lr_scale,
                     "betas": adam_betas,
-                    "eps": 1e-10,
+                    "eps": adam_eps,
                     "weight_decay": 0.0,
                 }
 
@@ -359,24 +509,36 @@ class AdamW:
 ASPECT_RATIO = 64
 HEAD_DIM = 128
 WINDOW_PATTERN = "SSSL"
+MLP_RATIO = 3
+VE_EVERY_LAYER = True
 
 # v0.1: AdamW only. Muon port is future work.
-TOTAL_BATCH_SIZE = 2**16
+TOTAL_BATCH_SIZE = 2**15
 EMBEDDING_LR = 0.6
 UNEMBEDDING_LR = 0.004
-MATRIX_LR = 0.04
-SCALAR_LR = 0.5
-WEIGHT_DECAY = 0.2
+MATRIX_LR = 0.005
+WEIGHT_DECAY = 0.15
 ADAM_BETAS = (0.8, 0.95)
-WARMUP_RATIO = 0.0
-WARMDOWN_RATIO = 0.5
+ADAM_EPS = 1e-8
+WARMUP_RATIO = 0.1
+WARMDOWN_RATIO = 0.4
 FINAL_LR_FRAC = 0.0
 
 # Model size
 DEPTH = 4
 DEVICE_BATCH_SIZE = 16
 FINAL_EVAL_BATCH_SIZE = 256
+FINAL_EVAL_MICROBATCH_SIZE = DEVICE_BATCH_SIZE
+LOG_EVERY_STEPS = 10
 STARTUP_EXCLUDE_STEPS = 1
+
+# In-training test iteration + feedback memory
+ENABLE_INLOOP_TEST_FEEDBACK = False
+MEMORY_MODE = "both"  # off | gradmem | engram | both
+EPOCH_TEST_BATCH_SIZE = 32
+EPOCH_TEST_BATCHES = 1
+MEMORY_ADAPT_STRENGTH = 0.08
+MEMORY_ADAPT_CLAMP = 0.20
 
 
 def get_lr_multiplier(progress):
@@ -425,7 +587,7 @@ optimizer = AdamW(
     matrix_lr=MATRIX_LR,
     weight_decay=WEIGHT_DECAY,
     adam_betas=ADAM_BETAS,
-    scalar_lr=SCALAR_LR,
+    adam_eps=ADAM_EPS,
 )
 
 loss_grad_fn = nn.value_and_grad(model, lambda model, inputs, targets: model(inputs, targets=targets))
@@ -437,6 +599,22 @@ smooth_train_loss = 0.0
 total_training_time = 0.0
 step = 0
 t_compiled = None
+prev_epoch = epoch
+probe_prev_bpb = None
+memory_lr_scale = 1.0
+
+if ENABLE_INLOOP_TEST_FEEDBACK:
+    token_bytes = get_token_bytes()
+    val_probe_loader = make_dataloader(tokenizer, EPOCH_TEST_BATCH_SIZE, MAX_SEQ_LEN, "val")
+    feedback_memory = InLoopMemory(
+        mode=MEMORY_MODE,
+        adapt_strength=MEMORY_ADAPT_STRENGTH,
+        adapt_clamp=MEMORY_ADAPT_CLAMP,
+    )
+    print(
+        f"In-loop feedback enabled | mode={MEMORY_MODE} | "
+        f"epoch_test_batches={EPOCH_TEST_BATCHES} | epoch_test_batch_size={EPOCH_TEST_BATCH_SIZE}"
+    )
 
 while True:
     t0 = time.time()
@@ -461,7 +639,8 @@ while True:
 
     progress = min(total_training_time / TIME_BUDGET, 1.0)
     lrm = get_lr_multiplier(progress)
-    optimizer.set_lr_multiplier(lrm)
+    effective_lrm = lrm * memory_lr_scale
+    optimizer.set_lr_multiplier(effective_lrm)
     optimizer.update(model, accum_grads)
     mx.eval(model.parameters(), *optimizer.state)
 
@@ -481,13 +660,31 @@ while True:
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt) if dt > 0 else 0
     remaining = max(0.0, TIME_BUDGET - total_training_time)
 
-    print(
-        f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
-        f"lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | "
-        f"epoch: {epoch} | remaining: {remaining:.0f}s    ",
-        end="",
-        flush=True,
-    )
+    if step < 5 or (step + 1) % LOG_EVERY_STEPS == 0 or total_training_time >= TIME_BUDGET:
+        print(
+            f"step {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | "
+            f"lrm: {effective_lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | "
+            f"epoch: {epoch} | remaining: {remaining:.0f}s",
+            flush=True,
+        )
+
+    # "Test iteration every epoch": run quick val probe and update feedback memory online.
+    if ENABLE_INLOOP_TEST_FEEDBACK and epoch != prev_epoch:
+        probe_bpb = evaluate_bpb_probe(model, token_bytes, val_probe_loader, EPOCH_TEST_BATCHES)
+        probe_delta = 0.0 if probe_prev_bpb is None else (probe_prev_bpb - probe_bpb)
+        peak_mem_mb = get_peak_memory_mb()
+        memory_lr_scale, mem_score = feedback_memory.update(
+            probe_delta=probe_delta,
+            train_loss=debiased_smooth_loss,
+            peak_mem_mb=peak_mem_mb,
+        )
+        probe_prev_bpb = probe_bpb
+        print(
+            f"\n[epoch-test] epoch={epoch} probe_bpb={probe_bpb:.6f} "
+            f"delta={probe_delta:+.6f} mem_score={mem_score:+.4f} "
+            f"next_lr_scale={memory_lr_scale:.3f}"
+        )
+        prev_epoch = epoch
 
     if step == 0:
         gc.collect()
@@ -507,7 +704,8 @@ print(f"Training completed in {t_train - t_compiled:.1f}s")
 total_tokens = step * TOTAL_BATCH_SIZE
 print("Starting final eval...")
 print(f"Final eval batch size: {FINAL_EVAL_BATCH_SIZE}")
-val_bpb = evaluate_bpb(model, tokenizer, FINAL_EVAL_BATCH_SIZE)
+print(f"Final eval microbatch size: {FINAL_EVAL_MICROBATCH_SIZE}")
+val_bpb = evaluate_bpb(model, tokenizer, FINAL_EVAL_BATCH_SIZE, FINAL_EVAL_MICROBATCH_SIZE)
 t_eval = time.time()
 print(f"Final eval completed in {t_eval - t_train:.1f}s")
 

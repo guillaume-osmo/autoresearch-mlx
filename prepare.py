@@ -317,32 +317,81 @@ def make_dataloader(tokenizer, batch_size, seq_len, split, buffer_size=1000):
         yield inputs, targets, epoch
 
 
-def evaluate_bpb(model, tokenizer, batch_size):
+def _evaluate_bpb_once(model, tokenizer, batch_size, microbatch_size=None):
+    token_bytes = get_token_bytes()
+    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
+    steps = max(1, EVAL_TOKENS // (batch_size * MAX_SEQ_LEN))
+    total_nats = 0.0
+    total_bytes = 0
+    current_microbatch_size = batch_size if microbatch_size is None else min(batch_size, max(1, int(microbatch_size)))
+
+    for _ in range(steps):
+        x, y, _ = next(val_loader)
+        for start in range(0, x.shape[0], current_microbatch_size):
+            stop = min(x.shape[0], start + current_microbatch_size)
+            x_mb = x[start:stop]
+            y_mb = y[start:stop]
+            loss_flat = model(x_mb, y_mb, reduction="none").reshape(-1)
+            y_flat = y_mb.reshape(-1)
+            nbytes = mx.take(token_bytes, y_flat, axis=0)
+            mask = nbytes > 0
+            total_nats += mx.sum(loss_flat * mask).item()
+            total_bytes += int(mx.sum(nbytes).item())
+
+    if total_bytes == 0:
+        return float("inf")
+    return total_nats / (math.log(2) * total_bytes)
+
+
+def _is_eval_oom(exc):
+    message = str(exc).lower()
+    return (
+        "metal::malloc" in message
+        or "maximum allowed buffer size" in message
+        or "out of memory" in message
+    )
+
+
+def evaluate_bpb(model, tokenizer, batch_size, microbatch_size=None):
     """
     Bits per byte (BPB): vocab size-independent evaluation metric.
     Sums per-token cross-entropy (in nats), sums target byte lengths,
     then converts nats/byte to bits/byte. Special tokens (byte length 0)
     are excluded from both sums.
     Uses fixed MAX_SEQ_LEN so results are comparable across configs.
+
+    Final evaluation is microbatched to keep peak memory bounded. If a given
+    microbatch still does not fit on-device, back off automatically instead of
+    failing after the full training run has already completed.
     """
-    token_bytes = get_token_bytes()
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
-    steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
-    total_nats = 0.0
-    total_bytes = 0
-
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction="none").reshape(-1)
-        y_flat = y.reshape(-1)
-        nbytes = mx.take(token_bytes, y_flat, axis=0)
-        mask = nbytes > 0
-        total_nats += mx.sum(loss_flat * mask).item()
-        total_bytes += int(mx.sum(nbytes).item())
-
-    if total_bytes == 0:
-        return float("inf")
-    return total_nats / (math.log(2) * total_bytes)
+    current_batch_size = max(1, int(batch_size))
+    current_microbatch_size = current_batch_size if microbatch_size is None else min(current_batch_size, max(1, int(microbatch_size)))
+    while True:
+        try:
+            return _evaluate_bpb_once(model, tokenizer, current_batch_size, current_microbatch_size)
+        except RuntimeError as exc:
+            if not _is_eval_oom(exc):
+                raise
+            if current_microbatch_size > 1:
+                next_microbatch_size = max(1, current_microbatch_size // 2)
+                print(
+                    f"[final-eval] OOM at microbatch_size={current_microbatch_size}; retrying with microbatch_size={next_microbatch_size}",
+                    flush=True,
+                )
+                current_microbatch_size = next_microbatch_size
+            elif current_batch_size > 1:
+                next_batch_size = max(1, current_batch_size // 2)
+                print(
+                    f"[final-eval] OOM at batch_size={current_batch_size}; retrying with batch_size={next_batch_size}",
+                    flush=True,
+                )
+                current_batch_size = next_batch_size
+                current_microbatch_size = min(current_microbatch_size, current_batch_size)
+            else:
+                raise
+            if hasattr(mx, "clear_cache"):
+                mx.clear_cache()
+            time.sleep(0.1)
 
 
 if __name__ == "__main__":
