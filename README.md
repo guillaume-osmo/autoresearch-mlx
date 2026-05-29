@@ -41,6 +41,25 @@ SCORE could reduce memory and improve residual skip connection https://arxiv.org
 
 In results_score you can find my manual modifications results see paper supplementary last page for 11 March best results.
 
+## Best result so far — `val_bpb` 1.2647 (M3 Max)
+
+Current best on the 5-minute MLX challenge: **`val_bpb` 1.2647** with [`trainscorev4_ns2.py`](trainscorev4_ns2.py) — beating the previous best of 1.295. The win is pure **throughput**: `val_bpb` is step-bound in a fixed window, so anything that buys more optimizer steps lowers it.
+
+| variant | steps | val_bpb |
+|---|---|---|
+| `trainscorev4` baseline (eager, Polar-Express steps=5) | 782 | 1.2810 |
+| + `mx.compile` (forward+grad) | 863 | 1.2733 |
+| + Polar steps 5→3 + one `mx.eval`/step | 922 | 1.2704 |
+| **+ Polar steps 5→2 (`trainscorev4_ns2.py`)** | **1081** | **1.2647** |
+| + Polar steps →1 (floor: too crude) | 1082 | 1.2812 |
+
+Levers (M3 Max, 5-min budget):
+- **`mx.compile` the forward+grad** with `inputs/outputs=model.state` (so the eager optimizer's per-step param updates don't trigger recompiles) — the single biggest win, ~+10% steps.
+- **Fewer Polar-Express iterations** in the Muon step: 2 still orthogonalizes well enough and frees steps; **1 is too crude** (`val_bpb` collapses back to baseline) *and* buys no extra steps — so the orthogonalization lever bottoms out at 2.
+- Reaffirms the project's core finding one level deeper: **more optimizer steps beat compute-per-step** — here by making each step faster (compile + fewer NS iters), not by shrinking the model.
+
+Reproduce: `uv run trainscorev4_ns2.py` (baseline: `uv run trainscorev4.py`).
+
 ## Results on M1 Mac Studio (48GB)
 
 Starting from the upstream default configuration and running the autoresearch loop:
