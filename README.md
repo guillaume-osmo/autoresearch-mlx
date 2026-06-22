@@ -135,6 +135,34 @@ NS_STEPS = 3              # if using Muon
 Starting points. The loop will find better settings for your hardware.
 
 
+## Current best: `train.py` = trainscorev4_ns2 (val_bpb 1.2745)
+
+`train.py` is now the verified winner of the experiment sweep: a SCORE-architecture
+model (recurrent ODE-style block stages) with batched MuonAdamW, bigram embeddings,
+SwiGLU, and value embeddings, plus three throughput optimizations that turn saved
+wall-clock into more optimizer steps (val_bpb is step-bound in a fixed budget):
+
+1. `mx.compile` over forward+loss+grad (inputs/outputs bound to `model.state`, so
+   per-step eager optimizer updates don't trigger recompiles);
+2. Polar-Express (Newton–Schulz) steps **5 → 2** — the sweet spot (NS=1 is too
+   crude, NS=3 leaves steps on the table);
+3. a single `mx.eval` per step (microbatch grads accumulate lazily).
+
+Speed ablation (M3 Max, 300s budget):
+
+| variant | steps | val_bpb |
+|---|---|---|
+| baseline (eager, NS=5) | 782 | 1.2810 |
+| + mx.compile | 863 | 1.2733 |
+| + NS=3 + one eval/step | 922 | 1.2704 |
+| **+ NS=2 (winner)** | **1081** | **1.2647** |
+| + NS=1 (floor: too rough) | 1082 | 1.2812 |
+
+Independently re-verified on an M3 Max with a **fresh** feedback state: 1.2745
+(962 steps). Note: the in-loop gradmem feedback persists `gradmem_state.json`
+across runs; a stale state silently degrades results (~+0.007 bpb), so that file
+is gitignored — start each measured run from a clean state.
+
 ## Acknowledgments
 
 - [Andrej Karpathy](https://github.com/karpathy) — autoresearch and nanochat

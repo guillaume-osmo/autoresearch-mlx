@@ -4,3 +4,5 @@ c67ad2a	2.695369	26.9	discard	lower weight decay to 0.1
 909dd59	2.588904	26.9	keep	halve total batch size to 2^16
 4161af3	2.533728	26.9	keep	increase matrix LR to 0.04
 5efc7aa	1.807902	20.7	keep	reduce depth from 8 to 4
+84bc265	1.281000	27.2	keep	SCORE arch + MuonAdamW + bigram + SwiGLU (trainscorev4)
+HEAD	1.274544	27.7	keep	trainscorev4_ns2: mx.compile fwd+grad + Polar-Express steps 5->2 + one eval/step (verified M3 Max, fresh feedback state)

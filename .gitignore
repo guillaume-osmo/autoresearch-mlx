@@ -7,3 +7,8 @@ run.log
 surfaces.txt
 surface-verify-prompt.md
 build-2-closeout.md
+# In-loop feedback state is per-machine and persists across runs.
+# Committing it makes experiments non-reproducible: a stale state silently
+# degrades val_bpb (observed +0.007 bpb on trainscorev4_ns2). Keep it local.
+gradmem_state.json
+gradmem_state.*.json
